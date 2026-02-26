@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Charisma Investment V2 | مانیتورینگ لحظه‌ای طلا و نقره</title>
+    <meta name="description" content="Charisma Investment V2 - Real-time monitoring of Gold and Silver prices with Telegram alerts">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container { max-width: 1200px; margin: 0 auto; }
+
+        header {
+            text-align: center;
+            color: white;
+            margin-bottom: 30px;
+            padding: 20px;
+        }
+
+        h1 { font-size: 2.5rem; margin-bottom: 10px; }
+        .subtitle { opacity: 0.9; font-size: 1.1rem; }
+
+        .status-bar {
+            background: rgba(255,255,255,0.1);
+            backdrop-filter: blur(10px);
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+            display: flex;
+            justify-content: space-around;
+            align-items: center;
+            color: white;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .status-item { display: flex; align-items: center; gap: 8px; }
+
+        .live-indicator {
+            width: 10px;
+            height: 10px;
+            background: #10b981;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.5; transform: scale(0.8); }
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .card {
+            background: white;
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            transition: transform 0.3s;
+        }
+
+        .card:hover { transform: translateY(-5px); }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 2px solid #f0f0f0;
+        }
+
+        .card-title { font-size: 1.5rem; font-weight: bold; color: #2d3748; }
+        .icon { font-size: 2.5rem; }
+
+        .price {
+            font-size: 3rem;
+            font-weight: bold;
+            color: #2d3748;
+            margin: 20px 0;
+            text-align: center;
+        }
+
+        .change {
+            text-align: center;
+            font-size: 1.2rem;
+            padding: 10px;
+            border-radius: 10px;
+            margin: 15px 0;
+        }
+
+        .positive { background: #d1fae5; color: #065f46; }
+        .negative { background: #fee2e2; color: #991b1b; }
+
+        .stats {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin-top: 20px;
+        }
+
+        .stat {
+            text-align: center;
+            padding: 15px;
+            background: #f8fafc;
+            border-radius: 10px;
+        }
+
+        .stat-label { font-size: 0.9rem; color: #64748b; margin-bottom: 5px; }
+        .stat-value { font-size: 1.3rem; font-weight: bold; color: #2d3748; }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: white;
+            font-size: 1.2rem;
+        }
+
+        .error {
+            background: #fee2e2;
+            color: #991b1b;
+            padding: 15px;
+            border-radius: 10px;
+            margin: 20px 0;
+            text-align: center;
+        }
+
+        .portfolio-summary {
+            background: white;
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+        }
+
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+
+        .alert-banner {
+            background: #fef3c7;
+            color: #92400e;
+            padding: 15px;
+            border-radius: 10px;
+            margin: 20px 0;
+            text-align: center;
+            border: 2px solid #f59e0b;
+            display: none;
+        }
+
+        @media (max-width: 768px) {
+            .grid { grid-template-columns: 1fr; }
+            .price { font-size: 2rem; }
+            h1 { font-size: 1.8rem; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🏆 Charisma Investment V2</h1>
+            <div class="subtitle">مانیتورینگ لحظه‌ای طلا و نقره</div>
+        </header>
+
+        <div class="status-bar">
+            <div class="status-item">
+                <span class="live-indicator"></span>
+                <span>وضعیت: <strong>زنده</strong></span>
+            </div>
+            <div class="status-item">
+                <span>🕐 آخرین به‌روزرسانی:</span>
+                <span id="lastUpdate">--:--:--</span>
+            </div>
+            <div class="status-item">
+                <span>🔄 آپدیت بعدی:</span>
+                <span id="nextUpdate">-- ثانیه</span>
+            </div>
+        </div>
+
+        <div id="alertBanner" class="alert-banner">
+            🔔 <strong>هشدار:</strong> قیمت تغییر معنادار داشت! پیام به تلگرام ارسال شد.
+        </div>
+
+        <div id="loading" class="loading">⏳ در حال دریافت قیمت‌های لحظه‌ای...</div>
+        <div id="errorContainer"></div>
+
+        <div id="dashboard" style="display: none;">
+            <div class="grid">
+                <!-- طلا -->
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">طلا (۲۴ عیار)</span>
+                        <span class="icon">🥇</span>
+                    </div>
+                    <div class="price" id="goldPrice">-</div>
+                    <div class="change" id="goldChange">-</div>
+                    <div class="stats">
+                        <div class="stat">
+                            <div class="stat-label">معادل ۱۸ عیار</div>
+                            <div class="stat-value" id="gold18k">-</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">تغییرات ۲۴h</div>
+                            <div class="stat-value" id="goldChange24h">-</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- نقره -->
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">نقره</span>
+                        <span class="icon">🥈</span>
+                    </div>
+                    <div class="price" id="silverPrice">-</div>
+                    <div class="change" id="silverChange">-</div>
+                    <div class="stats">
+                        <div class="stat">
+                            <div class="stat-label">قیمت (تومان)</div>
+                            <div class="stat-value" id="silverPriceToman">-</div>
+                        </div>
+                        <div class="stat">
+                            <div class="stat-label">تغییرات ۲۴h</div>
+                            <div class="stat-value" id="silverChange24h">-</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- پرتفو -->
+            <div class="portfolio-summary">
+                <h2 style="margin-bottom: 20px; color: #2d3748;">📊 خلاصه پرتفو</h2>
+                <div class="summary-grid">
+                    <div class="stat">
+                        <div class="stat-label">ارزش کل</div>
+                        <div class="stat-value" id="portfolioValue">-</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-label">سود/زیان خالص</div>
+                        <div class="stat-value" id="portfolioProfit">-</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-label">درصد بازدهی</div>
+                        <div class="stat-value" id="portfolioReturn">-</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-label">نقطه سر‌به‌سر</div>
+                        <div class="stat-value" id="breakeven">-</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const CONFIG = {
+            REFRESH_INTERVAL: 30000,
+            API_URL: '/api/prices',
+            PORTFOLIO_URL: '/api/portfolio',
+            PORTFOLIO: {
+                goldQty: parseFloat(localStorage.getItem('goldQty') || 10),
+                goldAvg: parseFloat(localStorage.getItem('goldAvg') || 24900000),
+                silverQty: parseFloat(localStorage.getItem('silverQty') || 100),
+                silverAvg: parseFloat(localStorage.getItem('silverAvg') || 500000)
+            }
+        };
+
+        let countdownInterval;
+        let nextUpdate = CONFIG.REFRESH_INTERVAL / 1000;
+
+        function formatNumber(num) {
+            return num.toLocaleString('fa-IR');
+        }
+
+        async function fetchPrices() {
+            try {
+                const response = await fetch(CONFIG.API_URL);
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                
+                const data = await response.json();
+                
+                if (!data.success) throw new Error(data.error);
+                
+                updateUI(data);
+                
+                if (data.alertSent) {
+                    document.getElementById('alertBanner').style.display = 'block';
+                    setTimeout(() => {
+                        document.getElementById('alertBanner').style.display = 'none';
+                    }, 10000);
+                }
+                
+                calculatePortfolio(data);
+                
+                console.log('✅ Data refreshed:', new Date().toLocaleTimeString('fa-IR'));
+            } catch (error) {
+                console.error('Fetch error:', error);
+                showError('خطا در دریافت داده‌ها از سرور');
+            }
+        }
+
+        async function calculatePortfolio(priceData) {
+            try {
+                const response = await fetch(CONFIG.PORTFOLIO_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(CONFIG.PORTFOLIO)
+                });
+                
+                if (!response.ok) return;
+                
+                const data = await response.json();
+                if (!data.success) return;
+                
+                const p = data.portfolio;
+                document.getElementById('portfolioValue').textContent = formatNumber(p.totalValue) + ' تومان';
+                
+                const profitEl = document.getElementById('portfolioProfit');
+                profitEl.textContent = formatNumber(p.netProfit) + ' تومان';
+                profitEl.style.color = p.netProfit >= 0 ? '#065f46' : '#991b1b';
+                
+                const returnEl = document.getElementById('portfolioReturn');
+                returnEl.textContent = (parseFloat(p.returnPercent) > 0 ? '+' : '') + p.returnPercent + '%';
+                returnEl.style.color = parseFloat(p.returnPercent) >= 0 ? '#065f46' : '#991b1b';
+                
+                document.getElementById('breakeven').textContent = formatNumber(p.breakevenGold) + ' تومان';
+            } catch (error) {
+                console.error('Portfolio error:', error);
+            }
+        }
+
+        function updateUI(data) {
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('dashboard').style.display = 'block';
+            document.getElementById('errorContainer').innerHTML = '';
+
+            document.getElementById('goldPrice').textContent = formatNumber(Math.round(data.gold.price24k)) + ' تومان';
+            document.getElementById('gold18k').textContent = formatNumber(Math.round(data.gold.price18k)) + ' تومان';
+            
+            const goldChangeEl = document.getElementById('goldChange');
+            goldChangeEl.textContent = (data.gold.change > 0 ? '+' : '') + data.gold.change.toFixed(2) + '%';
+            goldChangeEl.className = 'change ' + (data.gold.change >= 0 ? 'positive' : 'negative');
+            document.getElementById('goldChange24h').textContent = (data.gold.change > 0 ? '+' : '') + data.gold.change.toFixed(2) + '%';
+
+            document.getElementById('silverPrice').textContent = formatNumber(Math.round(data.silver.price)) + ' تومان';
+            document.getElementById('silverPriceToman').textContent = formatNumber(Math.round(data.silver.price)) + ' تومان';
+            
+            const silverChangeEl = document.getElementById('silverChange');
+            silverChangeEl.textContent = (data.silver.change > 0 ? '+' : '') + data.silver.change.toFixed(2) + '%';
+            silverChangeEl.className = 'change ' + (data.silver.change >= 0 ? 'positive' : 'negative');
+            document.getElementById('silverChange24h').textContent = (data.silver.change > 0 ? '+' : '') + data.silver.change.toFixed(2) + '%';
+
+            const now = new Date();
+            document.getElementById('lastUpdate').textContent = now.toLocaleTimeString('fa-IR');
+        }
+
+        function showError(message) {
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('errorContainer').innerHTML = `
+                <div class="error">⚠️ ${message}<br><small>در حال تلاش مجدد...</small></div>
+            `;
+        }
+
+        function startCountdown() {
+            countdownInterval = setInterval(() => {
+                nextUpdate--;
+                if (nextUpdate <= 0) {
+                    nextUpdate = CONFIG.REFRESH_INTERVAL / 1000;
+                    fetchPrices();
+                }
+                document.getElementById('nextUpdate').textContent = nextUpdate + ' ثانیه';
+            }, 1000);
+        }
+
+        fetchPrices();
+        startCountdown();
+        
+        window.addEventListener('beforeunload', () => {
+            if (countdownInterval) clearInterval(countdownInterval);
+        });
+
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) {
+                fetchPrices();
+                nextUpdate = CONFIG.REFRESH_INTERVAL / 1000;
+            }
+        });
+    </script>
+</body>
+</html>
