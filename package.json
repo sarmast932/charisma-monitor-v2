@@ -2,8 +2,8 @@
   "name": "charisma-monitor-v2",
   "version": "2.0.0",
   "private": true,
-  "description": "Real-time Gold & Silver Monitor with Telegram Alerts",
   "type": "module",
+  "description": "Real-time Gold & Silver Monitor with Telegram Alerts",
   "scripts": {
     "dev": "vercel dev",
     "build": "echo 'No build step needed'",
