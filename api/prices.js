@@ -1,148 +1,107 @@
-import { getRedis } from '../lib/redis.js';
+import { Redis } from '@upstash/redis';
 
+// آستانه‌ها
 const PRICE_CHANGE_ABSOLUTE = 100000;
 const PRICE_CHANGE_PERCENT = 0.5;
 const SPAM_PREVENTION_WINDOW = 300;
 
-async function sendTelegram(message) {
-  const BOT_TOKEN = process.env.BOT_TOKEN;
-  const CHAT_ID = process.env.CHAT_ID;
-  
-  if (!BOT_TOKEN || !CHAT_ID) return;
-
-  const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`;
-  
-  try {
-    await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: CHAT_ID,
-        text: message,
-        parse_mode: 'Markdown'
-      }),
-    });
-  } catch (error) {
-    console.error('Telegram Error:', error.message);
-  }
+// اتصال به Redis
+function getRedis() {
+  return new Redis({
+    url: process.env.REDIS_URL,
+    token: process.env.REDIS_TOKEN,
+  });
 }
 
-async function fetchPriceFromCharisma(asset) {
-  const url = `https://inv.charisma.ir/pub/Plans/${asset}`;
-  
-  try {
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        'User-Agent': 'Mozilla/5.0',
-        'Accept': 'application/json',
-      },
-    });
-    
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    
-    const data = await response.json();
-    const priceData = data.data;
-    
-    if (!priceData || !priceData.latestIndexPrice) {
-      throw new Error('Invalid data structure');
-    }
-    
-    const priceRial = parseFloat(priceData.latestIndexPrice.index);
-    const change = parseFloat(priceData.latestIndexPrice.value);
-    
-    return {
-      priceRial,
-      priceToman: priceRial / 10,
-      change: Math.abs(change) < 10 ? change * 100 : change,
-      timestamp: new Date().toISOString()
-    };
-  } catch (error) {
-    console.error(`Error fetching ${asset}:`, error.message);
-    throw error;
+// ارسال به تلگرام
+async function sendTelegram(message) {
+  const { BOT_TOKEN, CHAT_ID } = process.env;
+  if (!BOT_TOKEN || !CHAT_ID) {
+    console.log('⚠️ Telegram: credentials missing');
+    return;
   }
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: CHAT_ID, text: message, parse_mode: 'Markdown' })
+    });
+    console.log('📩 Telegram:', res.ok ? 'Sent' : 'Failed');
+  } catch (e) { console.error('Telegram Error:', e.message); }
+}
+
+// دریافت قیمت از کاریزما
+async function fetchPrice(asset) {
+  console.log(`🔄 Fetching ${asset} from Charisma...`);
+  const res = await fetch(`https://inv.charisma.ir/pub/Plans/${asset}`, {
+    headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' }
+  });
+  if (!res.ok) throw new Error(`Charisma API: HTTP ${res.status}`);
+  const json = await res.json();
+  const data = json.data;
+  if (!data?.latestIndexPrice?.index) throw new Error('Invalid Charisma response');
+  
+  const priceRial = parseFloat(data.latestIndexPrice.index);
+  const change = parseFloat(data.latestIndexPrice.value);
+  return {
+    priceToman: priceRial / 10,
+    change: Math.abs(change) < 10 ? change * 100 : change,
+    timestamp: new Date().toISOString()
+  };
 }
 
 export default async function handler(req, res) {
-  if (req.method !== 'GET' && req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
-
+  console.log('🚀 API /prices called');
+  
   try {
+    // بررسی Environment Variables
+    if (!process.env.REDIS_URL || !process.env.REDIS_TOKEN) {
+      throw new Error('Missing REDIS_URL or REDIS_TOKEN');
+    }
+    if (!process.env.BOT_TOKEN || !process.env.CHAT_ID) {
+      console.log('⚠️ Telegram credentials missing (non-fatal)');
+    }
+    
     const redis = getRedis();
     
-    const [goldData, silverData] = await Promise.all([
-      fetchPriceFromCharisma('Gold'),
-      fetchPriceFromCharisma('Silver')
+    // دریافت قیمت‌ها
+    const [gold, silver] = await Promise.all([
+      fetchPrice('Gold'),
+      fetchPrice('Silver')
     ]);
     
-    const gold18k = goldData.priceToman * 0.75;
+    console.log(`💰 Gold: ${gold.priceToman} T, Silver: ${silver.priceToman} T`);
     
-    const lastGold = await redis.get('last_gold_price');
-    const lastSilver = await redis.get('last_silver_price');
-    const lastAlertTime = await redis.get('last_alert_time') || 0;
+    const gold18k = gold.priceToman * 0.75;
     
+    // بررسی تغییر برای هشدار
+    const lastGold = await redis.get('last_gold');
+    const lastAlert = await redis.get('last_alert_time') || 0;
     const now = Math.floor(Date.now() / 1000);
-    let shouldAlert = false;
-    let alertMessages = [];
     
+    let alertSent = false;
     if (lastGold) {
-      const goldDiff = Math.abs(goldData.priceToman - lastGold.price);
-      const goldPercent = Math.abs((goldData.priceToman - lastGold.price) / lastGold.price * 100);
-      
-      if ((goldDiff > PRICE_CHANGE_ABSOLUTE || goldPercent > PRICE_CHANGE_PERCENT) && 
-          (now - lastAlertTime) > SPAM_PREVENTION_WINDOW) {
-        shouldAlert = true;
-        alertMessages.push(`🥇 **تغییر قیمت طلا**\nقدیم: ${Number(lastGold.price).toLocaleString()}\nجدید: ${Number(goldData.priceToman).toLocaleString()}`);
+      const diff = Math.abs(gold.priceToman - lastGold.price);
+      const pct = Math.abs((gold.priceToman - lastGold.price) / lastGold.price * 100);
+      if ((diff > PRICE_CHANGE_ABSOLUTE || pct > PRICE_CHANGE_PERCENT) && (now - lastAlert) > SPAM_PREVENTION_WINDOW) {
+        await sendTelegram(`🥇 طلا: ${Number(lastGold.price).toLocaleString()} → ${Number(gold.priceToman).toLocaleString()} تومان`);
+        await redis.set('last_alert_time', now);
+        alertSent = true;
+        console.log('🔔 Alert sent');
       }
     }
     
-    if (lastSilver) {
-      const silverDiff = Math.abs(silverData.priceToman - lastSilver.price);
-      const silverPercent = Math.abs((silverData.priceToman - lastSilver.price) / lastSilver.price * 100);
-      
-      if ((silverDiff > PRICE_CHANGE_ABSOLUTE || silverPercent > PRICE_CHANGE_PERCENT) && 
-          (now - lastAlertTime) > SPAM_PREVENTION_WINDOW) {
-        shouldAlert = true;
-        alertMessages.push(`🥈 **تغییر قیمت نقره**\nقدیم: ${Number(lastSilver.price).toLocaleString()}\nجدید: ${Number(silverData.priceToman).toLocaleString()}`);
-      }
-    }
+    // ذخیره در Redis
+    await redis.set('last_gold', { price: gold.priceToman, change: gold.change });
+    await redis.set('last_silver', { price: silver.priceToman, change: silver.change });
+    await redis.set('latest', { gold: { price24k: gold.priceToman, price18k: gold18k, change: gold.change }, silver, alertSent });
     
-    if (shouldAlert && alertMessages.length > 0) {
-      await sendTelegram(alertMessages.join('\n\n'));
-      await redis.set('last_alert_time', now);
-    }
-    
-    await redis.set('last_gold_price', {
-      price: goldData.priceToman,
-      price18k: gold18k,
-      change: goldData.change,
-      timestamp: goldData.timestamp
-    });
-    
-    await redis.set('last_silver_price', {
-      price: silverData.priceToman,
-      change: silverData.change,
-      timestamp: silverData.timestamp
-    });
-    
-    await redis.set('latest_prices', {
-      gold: { price24k: goldData.priceToman, price18k: gold18k, change: goldData.change },
-      silver: { price: silverData.priceToman, change: silverData.change },
-      lastUpdated: goldData.timestamp,
-      alertSent: shouldAlert
-    });
-    
-    return res.status(200).json({
-      success: true,
-      gold: { price24k: goldData.priceToman, price18k: gold18k, change: goldData.change },
-      silver: { price: silverData.priceToman, change: silverData.change },
-      lastUpdated: goldData.timestamp,
-      alertSent: shouldAlert
-    });
+    console.log('✅ Success');
+    return res.status(200).json({ success: true, gold: { price24k: gold.priceToman, price18k: gold18k, change: gold.change }, silver, alertSent });
     
   } catch (error) {
-    console.error('API Error:', error.message);
-    return res.status(500).json({ success: false, error: error.message });
+    console.error('❌ API Error:', error.message);
+    console.error('Stack:', error.stack);
+    return res.status(500).json({ success: false, error: error.message, env: { hasRedisUrl: !!process.env.REDIS_URL, hasRedisToken: !!process.env.REDIS_TOKEN } });
   }
 }

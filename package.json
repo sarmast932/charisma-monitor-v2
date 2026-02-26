@@ -2,6 +2,7 @@
   "name": "charisma-monitor-v2",
   "version": "2.0.0",
   "private": true,
+  "type": "module",
   "description": "Real-time Gold & Silver Monitor",
   "scripts": {
     "dev": "vercel dev",
