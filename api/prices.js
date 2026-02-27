@@ -1,93 +1,75 @@
-// api/prices.js - FINAL VERSION: CommonJS + Proxy Fallback + Cache
-// Compatible with Vercel Hobby Plan
+// api/prices.js - FINAL: Fast Fail + Always Return Cache
+// CommonJS | Vercel Hobby Compatible | Max Execution: ~3s
 
 const { Redis } = require('@upstash/redis');
 
-// Configuration
+// Configuration - Conservative for Speed
 const CONFIG = {
-  CHARISMA_BASE: 'https://inv.charisma.ir/pub/Plans',
-  // Proxy عمومی که درخواست‌ها را Relay می‌کند (اگر کار نکرد، مستقیم تلاش می‌کند)
-  PROXY_URL: 'https://api.allorigins.win/raw?url=',
-  PRICE_CHANGE_ABSOLUTE: 100000,
-  PRICE_CHANGE_PERCENT: 0.5,
-  SPAM_PREVENTION_WINDOW: 300,
-  MAX_RETRIES: 2,
-  CACHE_MAX_AGE: 600 // 10 minutes
+  CHARISMA_URL: 'https://inv.charisma.ir/pub/Plans',
+  FETCH_TIMEOUT: 2000, // 2 seconds max per request
+  CACHE_FALLBACK: true // Always return cache if live fails
 };
 
-// Redis Client
+// Redis Client (Singleton)
+let redisClient = null;
 function getRedis() {
-  return new Redis({
-    url: process.env.REDIS_URL,
-    token: process.env.REDIS_TOKEN,
-  });
+  if (!redisClient) {
+    redisClient = new Redis({
+      url: process.env.REDIS_URL,
+      token: process.env.REDIS_TOKEN,
+    });
+  }
+  return redisClient;
 }
 
-// Telegram Sender
+// Send Telegram Alert (Fire-and-forget, no await in main flow)
 async function sendTelegram(message) {
   const { BOT_TOKEN, CHAT_ID } = process.env;
   if (!BOT_TOKEN || !CHAT_ID) return;
   
-  try {
-    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: CHAT_ID,
-        text: message,
-        parse_mode: 'Markdown'
-      })
-    });
-    console.log('📩 Telegram: Sent');
-  } catch (e) {
-    console.error('Telegram Error:', e.message);
-  }
+  // Fire-and-forget: don't wait for response
+  fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: CHAT_ID,
+      text: message,
+      parse_mode: 'Markdown'
+    })
+  }).catch(e => console.error('Telegram:', e.message));
 }
 
-// Fetch Price with Proxy Fallback
-async function fetchPrice(asset, useProxy = true, retries = 0) {
-  const baseUrl = useProxy ? CONFIG.PROXY_URL + encodeURIComponent(CONFIG.CHARISMA_BASE) : CONFIG.CHARISMA_BASE;
-  const url = `${baseUrl}/${asset}`;
+// Fetch Single Price - Fast Fail
+async function fetchPriceFast(asset) {
+  const url = `${CONFIG.CHARISMA_URL}/${asset}`;
   
-  const headers = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-    'Accept': 'application/json',
-    'Accept-Language': 'fa-IR,fa;q=0.9',
-  };
-
   try {
-    console.log(`🔄 Fetching ${asset} (proxy:${useProxy}, attempt:${retries+1})`);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), CONFIG.FETCH_TIMEOUT);
     
-    const response = await fetch(url, { 
-      headers, 
-      method: 'GET',
-      timeout: 8000 
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0',
+        'Accept': 'application/json'
+      },
+      signal: controller.signal
     });
     
+    clearTimeout(timeout);
+    
     if (!response.ok) {
-      // اگر با Proxy هم 404 داد و هنوز retry داریم، بدون Proxy امتحان کن
-      if (useProxy && response.status === 404 && retries < CONFIG.MAX_RETRIES) {
-        console.log(`⚠️ ${asset}: Proxy failed, trying direct...`);
-        return fetchPrice(asset, false, retries + 1);
-      }
-      // اگر بدون Proxy هم 404 داد و retry داریم، با Proxy دوباره امتحان کن
-      if (!useProxy && retries < CONFIG.MAX_RETRIES) {
-        await new Promise(r => setTimeout(r, 500 + Math.random() * 500));
-        return fetchPrice(asset, true, retries + 1);
-      }
       throw new Error(`HTTP ${response.status}`);
     }
     
     const json = await response.json();
-    const data = json?.data;
+    const data = json?.data?.latestIndexPrice;
     
-    if (!data?.latestIndexPrice?.index) {
-      console.error('❌ Invalid response structure');
-      throw new Error('Invalid Charisma response');
+    if (!data?.index) {
+      throw new Error('Invalid response');
     }
     
-    const priceRial = parseFloat(data.latestIndexPrice.index);
-    const change = parseFloat(data.latestIndexPrice.value);
+    const priceRial = parseFloat(data.index);
+    const change = parseFloat(data.value);
     
     return {
       priceToman: priceRial / 10,
@@ -96,139 +78,146 @@ async function fetchPrice(asset, useProxy = true, retries = 0) {
     };
     
   } catch (error) {
-    // اگر هر دو حالت Proxy و Direct شکست خوردند
-    if (retries < CONFIG.MAX_RETRIES) {
-      await new Promise(r => setTimeout(r, 500 + Math.random() * 500));
-      return fetchPrice(asset, !useProxy, retries + 1);
-    }
-    throw error;
+    // Fast fail: don't retry, just throw
+    throw new Error(`${asset}: ${error.message}`);
   }
 }
 
-// Get Cached Data from Redis
-async function getCachedData(redis) {
+// Get Any Cache (Even Stale)
+async function getAnyCache(redis) {
   try {
     const cached = await redis.get('latest');
     if (cached?.gold?.price24k) {
-      const age = (Date.now() - new Date(cached.lastUpdated).getTime()) / 1000;
-      if (age < CONFIG.CACHE_MAX_AGE) {
-        console.log(`📦 Cache hit (age: ${Math.round(age)}s)`);
-        return { ...cached, source: 'cached', cacheAge: Math.round(age) };
-      }
+      const age = Math.round((Date.now() - new Date(cached.lastUpdated).getTime()) / 1000);
+      return { ...cached, source: 'cached', cacheAge: age };
     }
   } catch (e) {
-    console.error('Cache read error:', e.message);
+    console.error('Cache read:', e.message);
   }
   return null;
 }
 
-// Main Handler
+// Main Handler - Fast & Safe
 module.exports = async function handler(req, res) {
-  console.log('🚀 API /prices called');
+  const startTime = Date.now();
+  console.log('🚀 /prices called');
   
   try {
-    // Validate environment
+    // Validate env fast
     if (!process.env.REDIS_URL || !process.env.REDIS_TOKEN) {
-      throw new Error('Missing REDIS_URL or REDIS_TOKEN');
+      return res.status(500).json({ success: false, error: 'Missing Redis config' });
     }
     
     const redis = getRedis();
-    let gold, silver, source = 'live';
+    let gold, silver, source = 'live', alertSent = false;
     
-    // Try to fetch live prices
+    // Try live fetch with parallel requests + timeout
     try {
-      [gold, silver] = await Promise.all([
-        fetchPrice('Gold', true),
-        fetchPrice('Silver', true)
+      const [g, s] = await Promise.all([
+        fetchPriceFast('Gold'),
+        fetchPriceFast('Silver')
       ]);
-      console.log(`💰 Live: Gold=${gold.priceToman.toLocaleString()}T, Silver=${silver.priceToman.toLocaleString()}T`);
+      gold = g;
+      silver = s;
+      console.log(`💰 Live fetched in ${Date.now() - startTime}ms`);
     } catch (fetchError) {
-      console.warn(`⚠️ Live fetch failed: ${fetchError.message}. Trying cache...`);
+      console.warn(`⚠️ Live failed: ${fetchError.message}`);
       
-      // Fallback to cache
-      const cached = await getCachedData(redis);
-      if (cached) {
+      // Fallback: get ANY cache (even stale)
+      const cached = await getAnyCache(redis);
+      
+      if (CONFIG.CACHE_FALLBACK && cached) {
         gold = cached.gold;
         silver = cached.silver;
         source = 'cached';
+        console.log(`📦 Cache fallback (age: ${cached.cacheAge}s)`);
       } else {
-        throw new Error('No live data and no valid cache');
+        // No cache available - return clear error
+        return res.status(503).json({
+          success: false,
+          error: 'Service temporarily unavailable',
+          hint: 'Charisma API may be blocking this region. Try again in 1 minute.',
+          elapsed: Date.now() - startTime
+        });
       }
     }
     
+    // Calculate 18K gold
     const gold18k = gold.priceToman * 0.75;
-    let alertSent = false;
     
-    // Send alert only if we have fresh data
+    // Send alert ONLY if we have fresh data (non-blocking)
     if (source === 'live') {
-      const lastGold = await redis.get('last_gold');
-      const lastAlert = await redis.get('last_alert_time') || 0;
-      const now = Math.floor(Date.now() / 1000);
-      
-      if (lastGold) {
-        const diff = Math.abs(gold.priceToman - lastGold.price);
-        const pct = Math.abs((gold.priceToman - lastGold.price) / lastGold.price * 100);
+      try {
+        const lastGold = await redis.get('last_gold');
+        const lastAlert = await redis.get('last_alert_time') || 0;
+        const now = Math.floor(Date.now() / 1000);
         
-        if ((diff > CONFIG.PRICE_CHANGE_ABSOLUTE || pct > CONFIG.PRICE_CHANGE_PERCENT) && 
-            (now - lastAlert) > CONFIG.SPAM_PREVENTION_WINDOW) {
+        if (lastGold) {
+          const diff = Math.abs(gold.priceToman - lastGold.price);
+          const pct = Math.abs((gold.priceToman - lastGold.price) / lastGold.price * 100);
           
-          const msg = `🥇 **تغییر قیمت طلا**\n` +
-            `قدیم: ${Number(lastGold.price).toLocaleString('fa-IR')}\n` +
-            `جدید: ${Number(gold.priceToman).toLocaleString('fa-IR')}\n` +
-            `Δ: ${pct > 0 ? '+' : ''}${pct.toFixed(2)}%`;
-          
-          await sendTelegram(msg);
-          await redis.set('last_alert_time', now);
-          alertSent = true;
-          console.log('🔔 Alert sent');
+          if (diff > 100000 || pct > 0.5) {
+            if (now - lastAlert > 300) {
+              sendTelegram(`🥇 طلا: ${Number(lastGold.price).toLocaleString('fa-IR')} → ${Number(gold.priceToman).toLocaleString('fa-IR')}\nΔ: ${pct > 0 ? '+' : ''}${pct.toFixed(2)}%`);
+              await redis.set('last_alert_time', now);
+              alertSent = true;
+            }
+          }
         }
+        
+        // Update cache with fresh data (non-blocking best effort)
+        await Promise.all([
+          redis.set('last_gold', { price: gold.priceToman, change: gold.change, timestamp: gold.timestamp }),
+          redis.set('last_silver', { price: silver.priceToman, change: silver.change, timestamp: silver.timestamp }),
+          redis.set('latest', {
+            gold: { price24k: gold.priceToman, price18k: gold18k, change: gold.change },
+            silver: { price: silver.priceToman, change: silver.change },
+            alertSent,
+            lastUpdated: new Date().toISOString()
+          })
+        ]).catch(e => console.error('Cache write:', e.message));
+        
+      } catch (alertError) {
+        console.error('Alert logic:', alertError.message);
+        // Don't fail the response for alert errors
       }
-      
-      // Update cache with fresh data
-      await redis.set('last_gold', { price: gold.priceToman, change: gold.change, timestamp: gold.timestamp });
-      await redis.set('last_silver', { price: silver.priceToman, change: silver.change, timestamp: silver.timestamp });
-      await redis.set('latest', {
-        gold: { price24k: gold.priceToman, price18k: gold18k, change: gold.change },
-        silver: { price: silver.priceToman, change: silver.change },
-        alertSent,
-        lastUpdated: new Date().toISOString()
-      });
     }
     
-    console.log(`✅ Success (source: ${source})`);
-    
+    // Success response
     return res.status(200).json({
       success: true,
       source,
-      cacheAge: source === 'cached' ? (await getCachedData(redis))?.cacheAge : 0,
+      cacheAge: source === 'cached' ? (await getAnyCache(redis))?.cacheAge : 0,
       gold: { price24k: gold.priceToman, price18k: gold18k, change: gold.change },
       silver: { price: silver.priceToman, change: silver.change },
       alertSent,
-      timestamp: gold.timestamp || new Date().toISOString()
+      timestamp: gold.timestamp || new Date().toISOString(),
+      elapsed: Date.now() - startTime
     });
     
   } catch (error) {
-    console.error('❌ CRITICAL:', error.message);
+    console.error('❌ Handler error:', error.message);
     
-    // Last resort: return stale cache if available
+    // Last resort: try to return any cache
     try {
       const redis = getRedis();
-      const stale = await redis.get('latest');
-      if (stale?.gold?.price24k) {
-        console.log('📦 Returning stale cache');
+      const stale = await getAnyCache(redis);
+      if (stale) {
         return res.status(200).json({
           success: true,
           source: 'cached-stale',
-          warning: 'Live data unavailable',
-          ...stale
+          warning: 'Live fetch failed, showing cached data',
+          ...stale,
+          elapsed: Date.now() - startTime
         });
       }
     } catch (e) { /* ignore */ }
     
+    // Final error response
     return res.status(500).json({
       success: false,
       error: error.message,
-      hint: 'Charisma API may be blocking non-Iranian IPs'
+      elapsed: Date.now() - startTime
     });
   }
 };
